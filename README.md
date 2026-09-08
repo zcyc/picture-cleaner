@@ -1,55 +1,55 @@
 # Picture Cleaner
 
-跨平台本地图片清理工具，支持 macOS 和 Windows。图片分析在本机完成，删除操作会先移入系统回收站。
+[简体中文](README.zh-CN.md)
 
-## 功能
+A cross-platform local photo cleaner for macOS and Windows. Image analysis runs locally, and deleted files are moved to the system Trash or Recycle Bin.
 
-- **相似图片**：识别重复拍摄、裁剪或压缩后的近似照片。
-- **手机截图**：根据文件名和手机屏幕比例筛选截图。
-- **按时间**：默认使用照片拍摄时间（EXIF），也支持文件创建时间和修改时间。
-- **键盘操作**：支持图片浏览、切换相似图片组、移入回收站和撤销删除。
+## Features
 
-相似图片会按组展示：同组使用 ←→ 浏览，↑↓ 切换到上一组或下一组。
+- **Similar photos**: Finds burst shots and visually similar photos created by cropping or compression.
+- **Screenshots**: Filters screenshots using filenames and phone screen aspect ratios.
+- **Date filtering**: Uses EXIF capture time by default, with file creation and modification time options.
+- **Keyboard workflow**: Browse photos, switch similar-photo groups, move files to Trash, and undo deletions.
 
-## 快捷键
+Similar photos are grouped together. Use ←→ to browse within a group and ↑↓ to switch groups.
 
-| 操作 | 快捷键 |
+## Shortcuts
+
+| Action | Shortcut |
 | --- | --- |
-| 切换图片 | ← / → |
-| 切换相似图片组 | ↑ / ↓（相似图片模式） |
-| 移入回收站 | Delete / D / Backspace |
-| 撤销最近删除 | ⌘Z（macOS）/ Ctrl+Z（Windows） |
+| Switch photos | ← / → |
+| Switch similar-photo groups | ↑ / ↓ (similar-photo mode) |
+| Move to Trash | Delete / D / Backspace |
+| Undo recent deletion | Z / ⌘Z (macOS) / Ctrl+Z (Windows) |
 
-撤销支持连续回滚最近多次删除，仅保留在当前应用会话中；应用退出后不保留撤销记录。
+Undo supports multiple recent deletions during the current application session.
 
-## 开发
+## Development
 
-需要 Node.js LTS、Rust stable 和 Tauri 所需的系统依赖。
+Requires Node.js LTS, Rust stable, and the system dependencies required by Tauri.
 
 ```bash
 npm ci
 npm run tauri dev
 ```
 
-## 构建、安装与签名
+## Build, Install, and Sign
 
 ```bash
-make build       # 构建当前平台应用包
-make install     # 一键构建、签名、安装并启动当前平台版本
-make sign        # 构建并签名当前平台安装包
+make build       # Build the application package for the current OS
+make install     # Build, sign, install, and launch for the current OS
+make sign        # Build and sign for the current OS
 ```
 
 ### macOS
 
-本地默认使用 ad-hoc 签名，不需要 Apple Developer 证书：
+Local builds use ad-hoc signing by default:
 
 ```bash
 make install
 ```
 
-本地安装使用签名的 `.app`，不生成 DMG。
-
-如果已经安装正式证书，也可以指定签名身份：
+To use an installed Apple Developer certificate instead:
 
 ```bash
 APPLE_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" make sign-macos
@@ -57,45 +57,41 @@ APPLE_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" make sign-ma
 
 ### Windows
 
-本地会自动生成并复用当前用户的自签名代码证书，然后执行签名和安装：
+Local builds generate and reuse a self-signed code-signing certificate for the current user:
 
 ```powershell
 make install
 ```
 
-需要先安装 Windows SDK 提供的 `signtool.exe`。如果有正式 `.pfx` 证书，也可以显式指定：
+Install the Windows SDK to provide `signtool.exe`. To use a `.pfx` certificate instead:
 
 ```powershell
-$env:WINDOWS_CERTIFICATE_PASSWORD="证书密码"
+$env:WINDOWS_CERTIFICATE_PASSWORD="certificate password"
 make sign-windows WINDOWS_CERTIFICATE="C:\path\certificate.pfx"
 ```
 
-## GitHub 自动发版
+## GitHub Releases
 
-工作流位于 `.github/workflows/release.yml`。先同步以下文件中的版本号：
+The workflow is defined in `.github/workflows/release.yml`. Keep the versions in sync in:
 
 - `package.json`
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-版本号一致后推送对应的 `v*` 标签，例如：
+Push a matching `v*` tag to create a release:
 
 ```bash
 git tag v0.1.1
 git push origin v0.1.1
 ```
 
-Workflow 会自动发布以下安装包：
+The workflow builds:
 
 - macOS arm64
 - macOS x64
 - Windows x64
 
-CI 版本刻意保持未签名，不需要配置 Apple Developer 或 Windows 证书，也不需要额外的 GitHub Actions Secrets（使用 GitHub 自动提供的 `GITHUB_TOKEN` 即可）。用户下载后可能看到 macOS Gatekeeper 或 Windows SmartScreen 提示，需要手动确认后运行。
+## Limitations
 
-本地开发使用 `make install` 时仍会执行本地 ad-hoc / 自签名；这不会改变 CI 的未签名发布策略。
-
-## 当前限制
-
-- 相似图片扫描目前采用两两比较，超大图库可能需要更长时间。
-- 撤销备份是临时会话数据，不跨应用重启保留。
+- Similar-photo scanning currently compares images pairwise and may be slow for very large libraries.
+- Undo history is temporary and is not preserved across application restarts.

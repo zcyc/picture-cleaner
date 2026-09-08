@@ -2685,6 +2685,7 @@ dependencies = [
  "chrono",
  "image",
  "kamadak-exif",
+ "rayon",
  "serde",
  "serde_json",
  "tauri",

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local};
 use exif::{In, Reader, Tag};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageReader};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -132,39 +133,38 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
         return Err("请选择一个有效的图片文件夹".to_string());
     }
 
-    let mut candidates = Vec::new();
-    let mut total_scanned = 0;
-
-    for entry in WalkDir::new(&root)
+    let image_paths = WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() || !is_supported_image(entry.path()) {
-            continue;
-        }
+        .filter(|entry| entry.file_type().is_file() && is_supported_image(entry.path()))
+        .map(|entry| entry.into_path())
+        .collect::<Vec<_>>();
+    let total_scanned = image_paths.len();
+    let candidates = image_paths
+        .par_iter()
+        .filter_map(|path| {
+            let Ok(candidate) = analyze_image(path, &options.time_basis) else {
+                return None;
+            };
 
-        total_scanned += 1;
-        let Ok(candidate) = analyze_image(entry.path(), &options.time_basis) else {
-            continue;
-        };
+            if !in_date_range(
+                &candidate.item.date,
+                options.start_date.as_deref(),
+                options.end_date.as_deref(),
+            ) {
+                return None;
+            }
 
-        if !in_date_range(
-            &candidate.item.date,
-            options.start_date.as_deref(),
-            options.end_date.as_deref(),
-        ) {
-            continue;
-        }
+            if matches!(options.mode, ScanMode::Screenshots)
+                && !is_screenshot_candidate(path, candidate.item.width, candidate.item.height)
+            {
+                return None;
+            }
 
-        if matches!(options.mode, ScanMode::Screenshots)
-            && !is_screenshot_candidate(entry.path(), candidate.item.width, candidate.item.height)
-        {
-            continue;
-        }
-
-        candidates.push(candidate);
-    }
+            Some(candidate)
+        })
+        .collect::<Vec<_>>();
 
     let items = match options.mode {
         ScanMode::Similar => similar_items(candidates),
@@ -216,19 +216,31 @@ fn analyze_image(path: &Path, time_basis: &TimeBasis) -> Result<Candidate, Strin
 }
 
 fn similar_items(candidates: Vec<Candidate>) -> Vec<ImageItem> {
-    let mut parent: Vec<usize> = (0..candidates.len()).collect();
+    let candidate_count = candidates.len();
+    let candidate_refs: &[Candidate] = &candidates;
+    let mut parent: Vec<usize> = (0..candidate_count).collect();
 
-    // ponytail: O(n²) comparison keeps the MVP dependency-free; bucket hashes if libraries exceed ~10k images.
-    for left in 0..candidates.len() {
-        for right in (left + 1)..candidates.len() {
-            if are_similar(&candidates[left], &candidates[right]) {
-                union(&mut parent, left, right);
-            }
+    // ponytail: O(n²) remains the exact matcher; bucket hashes only after real libraries show this ceiling.
+    const LEFT_CHUNK_SIZE: usize = 64;
+    for start in (0..candidate_count).step_by(LEFT_CHUNK_SIZE) {
+        let end = (start + LEFT_CHUNK_SIZE).min(candidate_count);
+        let matches = (start..end)
+            .into_par_iter()
+            .flat_map_iter(|left| {
+                ((left + 1)..candidate_count).filter_map(move |right| {
+                    are_similar(&candidate_refs[left], &candidate_refs[right])
+                        .then_some((left, right))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (left, right) in matches {
+            union(&mut parent, left, right);
         }
     }
 
     let mut grouped: HashMap<usize, Vec<usize>> = HashMap::new();
-    for index in 0..candidates.len() {
+    for index in 0..candidate_count {
         let root = find(&mut parent, index);
         grouped.entry(root).or_default().push(index);
     }
@@ -239,13 +251,11 @@ fn similar_items(candidates: Vec<Candidate>) -> Vec<ImageItem> {
         .collect::<Vec<_>>();
     groups.sort_by_key(|group| group[0]);
 
-    let mut group_by_index = vec![None; candidates.len()];
-    let mut next_group_id = 0;
-    for group in groups {
+    let mut group_by_index = vec![None; candidate_count];
+    for (group_id, group) in groups.into_iter().enumerate() {
         for &index in &group {
-            group_by_index[index] = Some((next_group_id, group.len()));
+            group_by_index[index] = Some((group_id, group.len()));
         }
-        next_group_id += 1;
     }
 
     candidates
@@ -424,7 +434,7 @@ pub fn run() {
 mod tests {
     use super::{
         create_undo_backup, in_date_range, is_screenshot_candidate, normalize_exif_date,
-        restore_from_undo,
+        restore_from_undo, similar_items, Candidate, ImageItem,
     };
     use std::{fs, path::Path, time::SystemTime};
 
@@ -470,5 +480,43 @@ mod tests {
 
         assert_eq!(fs::read(&original).unwrap(), b"test image");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn similar_items_keeps_connected_groups() {
+        let items = similar_items(vec![
+            candidate("a", 0, 0),
+            candidate("b", 1, 0),
+            candidate("c", u64::MAX, u64::MAX),
+            candidate("d", u64::MAX - 1, u64::MAX),
+        ]);
+
+        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.group_id, item.group_size))
+                .collect::<Vec<_>>(),
+            vec![(Some(0), 2), (Some(0), 2), (Some(1), 2), (Some(1), 2)]
+        );
+    }
+
+    fn candidate(id: &str, full_hash: u64, crop_hash: u64) -> Candidate {
+        Candidate {
+            item: ImageItem {
+                id: id.to_string(),
+                path: id.to_string(),
+                name: id.to_string(),
+                bytes: 0,
+                width: 1,
+                height: 1,
+                date: "2026-09-07".to_string(),
+                date_source: "test".to_string(),
+                group_id: None,
+                group_size: 1,
+            },
+            full_hash,
+            crop_hash,
+        }
     }
 }

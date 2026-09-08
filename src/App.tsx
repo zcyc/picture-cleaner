@@ -169,7 +169,7 @@ function App() {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
       if (target?.tagName === "INPUT" || target?.tagName === "SELECT" || target?.tagName === "TEXTAREA") return;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+      if (event.key.toLowerCase() === "z") {
         if (undoStack.length === 0) return;
         event.preventDefault();
         void undoLastDelete();
@@ -232,7 +232,7 @@ function App() {
           <br />
           <span className="key-hint">D</span><span className="key-hint">⌫</span> 移入回收站
           <br />
-          <span className="key-hint">⌘Z</span><span className="key-hint">Ctrl Z</span> 撤销删除
+          <span className="key-hint">Z</span><span className="key-hint">⌘Z</span><span className="key-hint">Ctrl Z</span> 撤销删除
         </div>
       </aside>
 
@@ -319,7 +319,7 @@ function App() {
                 {mode === "similar" && <div><kbd>↑</kbd><kbd>↓</kbd><span>切换分组</span></div>}
                 <div><kbd>←</kbd><kbd>→</kbd><span>切换图片</span></div>
                 <div><kbd>Delete</kbd><kbd>D</kbd><kbd>⌫</kbd><span>移入回收站</span></div>
-                <div><kbd>⌘Z</kbd><kbd>Ctrl Z</kbd><span>撤销删除</span></div>
+                <div><kbd>Z</kbd><kbd>⌘Z</kbd><kbd>Ctrl Z</kbd><span>撤销删除</span></div>
               </div>
             </aside>
           </div>
