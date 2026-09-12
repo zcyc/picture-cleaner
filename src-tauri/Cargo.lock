@@ -2687,7 +2687,6 @@ dependencies = [
  "kamadak-exif",
  "rayon",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

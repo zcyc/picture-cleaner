@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use exif::{In, Reader, Tag};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageReader};
 use rayon::prelude::*;
@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
+use tauri::Manager;
 use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize)]
@@ -62,22 +63,32 @@ struct ScanResponse {
 
 struct Candidate {
     item: ImageItem,
-    full_hash: u64,
-    crop_hash: u64,
+    full_hash: Option<u64>,
+    crop_hash: Option<u64>,
 }
 
 #[tauri::command]
-async fn scan_folder(options: ScanOptions) -> Result<ScanResponse, String> {
+async fn scan_folder(app: tauri::AppHandle, options: ScanOptions) -> Result<ScanResponse, String> {
+    let root = Path::new(&options.root_path);
+    if !root.is_dir() {
+        return Err("请选择一个有效的图片文件夹".to_string());
+    }
+    app.asset_protocol_scope()
+        .allow_directory(root, true)
+        .map_err(|error| format!("无法读取图片文件夹：{error}"))?;
     tauri::async_runtime::spawn_blocking(move || scan_folder_sync(options))
         .await
         .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn move_to_trash(path: String) -> Result<String, String> {
+fn move_to_trash(app: tauri::AppHandle, path: String) -> Result<String, String> {
     let file = Path::new(&path);
     if !file.is_file() {
         return Err("文件不存在或不是普通文件".to_string());
+    }
+    if !app.asset_protocol_scope().is_allowed(file) {
+        return Err("文件不在已选择的图片文件夹中".to_string());
     }
 
     let backup = create_undo_backup(file)?;
@@ -132,19 +143,22 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
     if !root.is_dir() {
         return Err("请选择一个有效的图片文件夹".to_string());
     }
+    validate_date_range(options.start_date.as_deref(), options.end_date.as_deref())?;
+    let needs_hashes = matches!(&options.mode, ScanMode::Similar);
 
-    let image_paths = WalkDir::new(&root)
+    let mut image_paths = WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && is_supported_image(entry.path()))
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
+    image_paths.sort_unstable();
     let total_scanned = image_paths.len();
     let candidates = image_paths
         .par_iter()
         .filter_map(|path| {
-            let Ok(candidate) = analyze_image(path, &options.time_basis) else {
+            let Ok(candidate) = analyze_image(path, &options.time_basis, needs_hashes) else {
                 return None;
             };
 
@@ -180,7 +194,11 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
     })
 }
 
-fn analyze_image(path: &Path, time_basis: &TimeBasis) -> Result<Candidate, String> {
+fn analyze_image(
+    path: &Path,
+    time_basis: &TimeBasis,
+    needs_hashes: bool,
+) -> Result<Candidate, String> {
     let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     let image = ImageReader::open(path)
         .map_err(|error| error.to_string())?
@@ -210,8 +228,8 @@ fn analyze_image(path: &Path, time_basis: &TimeBasis) -> Result<Candidate, Strin
             group_id: None,
             group_size: 1,
         },
-        full_hash: perceptual_hash(&image, false),
-        crop_hash: perceptual_hash(&image, true),
+        full_hash: needs_hashes.then(|| perceptual_hash(&image, false)),
+        crop_hash: needs_hashes.then(|| perceptual_hash(&image, true)),
     })
 }
 
@@ -271,7 +289,13 @@ fn similar_items(candidates: Vec<Candidate>) -> Vec<ImageItem> {
 }
 
 fn are_similar(left: &Candidate, right: &Candidate) -> bool {
-    hamming(left.full_hash, right.full_hash) <= 14 || hamming(left.crop_hash, right.crop_hash) <= 14
+    left.full_hash
+        .zip(right.full_hash)
+        .is_some_and(|(left, right)| hamming(left, right) <= 14)
+        || left
+            .crop_hash
+            .zip(right.crop_hash)
+            .is_some_and(|(left, right)| hamming(left, right) <= 14)
 }
 
 fn perceptual_hash(image: &DynamicImage, crop_center: bool) -> u64 {
@@ -330,7 +354,11 @@ fn is_supported_image(path: &Path) -> bool {
 }
 
 fn is_screenshot_candidate(path: &Path, width: u32, height: u32) -> bool {
-    let name = path.to_string_lossy().to_ascii_lowercase();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let name_match = [
         "screenshot",
         "screen_shot",
@@ -417,6 +445,21 @@ fn in_date_range(date: &str, start: Option<&str>, end: Option<&str>) -> bool {
     start.is_none_or(|value| date >= value) && end.is_none_or(|value| date <= value)
 }
 
+fn validate_date_range(start: Option<&str>, end: Option<&str>) -> Result<(), String> {
+    let parse = |value: &str, label: &str| {
+        NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| format!("{label}日期无效"))
+    };
+    let start_date = start.map(|value| parse(value, "开始")).transpose()?;
+    let end_date = end.map(|value| parse(value, "结束")).transpose()?;
+    if start_date
+        .zip(end_date)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err("开始日期不能晚于结束日期".to_string());
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -434,7 +477,7 @@ pub fn run() {
 mod tests {
     use super::{
         create_undo_backup, in_date_range, is_screenshot_candidate, normalize_exif_date,
-        restore_from_undo, similar_items, Candidate, ImageItem,
+        restore_from_undo, similar_items, validate_date_range, Candidate, ImageItem,
     };
     use std::{fs, path::Path, time::SystemTime};
 
@@ -451,10 +494,16 @@ mod tests {
             1170,
             2532
         ));
+        assert!(!is_screenshot_candidate(
+            Path::new("Screenshots/holiday.png"),
+            1000,
+            1000
+        ));
         assert_eq!(
             normalize_exif_date("2026:09:07 12:30:00"),
             Some("2026-09-07".to_string())
         );
+        assert!(validate_date_range(Some("2026-09-08"), Some("2026-09-07")).is_err());
     }
 
     #[test]
@@ -515,8 +564,8 @@ mod tests {
                 group_id: None,
                 group_size: 1,
             },
-            full_hash,
-            crop_hash,
+            full_hash: Some(full_hash),
+            crop_hash: Some(crop_hash),
         }
     }
 }

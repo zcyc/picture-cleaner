@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
@@ -48,6 +48,16 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function errorMessage(error: unknown) {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "操作失败，请重试。";
+}
+
+function folderName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
 function App() {
   const [mode, setMode] = useState<Mode>("similar");
   const [timeBasis, setTimeBasis] = useState<TimeBasis>("captured");
@@ -61,6 +71,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  const [isMutating, setIsMutating] = useState(false);
+  const scanVersion = useRef(0);
 
   const activeItem = items[activeIndex] ?? null;
   const activeMode = modes.find((item) => item.id === mode) ?? modes[0];
@@ -83,6 +95,7 @@ function App() {
     nextEndDate = endDate,
   ) {
     if (!nextFolder) return;
+    const version = ++scanVersion.current;
     setIsScanning(true);
     setError(null);
     setNotice(null);
@@ -96,6 +109,7 @@ function App() {
           endDate: nextEndDate || null,
         },
       });
+      if (version !== scanVersion.current) return;
       setItems(result.items);
       setScannedCount(result.totalScanned);
       setActiveIndex(0);
@@ -103,21 +117,26 @@ function App() {
         setNotice(nextMode === "similar" ? "没有找到足够相似的图片。" : "当前条件下没有找到图片。");
       }
     } catch (scanError) {
-      setError(String(scanError));
+      if (version === scanVersion.current) setError(errorMessage(scanError));
     } finally {
-      setIsScanning(false);
+      if (version === scanVersion.current) setIsScanning(false);
     }
   }
 
   async function chooseFolder() {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== "string") return;
-    setFolder(selected);
-    await scan(selected);
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== "string") return;
+      setFolder(selected);
+      await scan(selected);
+    } catch (dialogError) {
+      setError(errorMessage(dialogError));
+    }
   }
 
   async function removeActive() {
-    if (!activeItem || isScanning) return;
+    if (!activeItem || isScanning || isMutating) return;
+    setIsMutating(true);
     try {
       const backupPath = await invoke<string>("move_to_trash", { path: activeItem.path });
       setUndoStack((current) => [...current, { item: activeItem, backupPath, index: activeIndex, viewKey }]);
@@ -125,12 +144,15 @@ function App() {
       setActiveIndex((current) => Math.min(current, Math.max(0, items.length - 2)));
       setNotice(`已移入回收站：${activeItem.name}`);
     } catch (deleteError) {
-      setError(String(deleteError));
+      setError(errorMessage(deleteError));
+    } finally {
+      setIsMutating(false);
     }
   }
 
   async function undoLastDelete() {
-    if (isScanning || undoStack.length === 0) return;
+    if (isScanning || isMutating || undoStack.length === 0) return;
+    setIsMutating(true);
     const entry = undoStack[undoStack.length - 1];
     try {
       await invoke("restore_from_undo", { backupPath: entry.backupPath, originalPath: entry.item.path });
@@ -147,7 +169,9 @@ function App() {
       }
       setNotice(`已撤销删除：${entry.item.name}`);
     } catch (undoError) {
-      setError(String(undoError));
+      setError(errorMessage(undoError));
+    } finally {
+      setIsMutating(false);
     }
   }
 
@@ -195,7 +219,7 @@ function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, activeItem, isScanning, mode, similarGroups, undoStack, viewKey, folder, timeBasis, startDate, endDate]);
+  }, [items, activeItem, isScanning, isMutating, mode, similarGroups, undoStack, viewKey, folder, timeBasis, startDate, endDate]);
 
   function changeMode(nextMode: Mode) {
     setMode(nextMode);
@@ -216,8 +240,8 @@ function App() {
         <nav className="mode-list" aria-label="清理模式">
           <div className="nav-caption">清理模式</div>
           {modes.map((item) => (
-            <button className={`mode-button ${item.id === mode ? "active" : ""}`} key={item.id} onClick={() => changeMode(item.id)}>
-              <span className="mode-icon">{item.icon}</span>
+            <button className={`mode-button ${item.id === mode ? "active" : ""}`} key={item.id} disabled={isMutating} aria-pressed={item.id === mode} onClick={() => changeMode(item.id)}>
+              <span className="mode-icon" aria-hidden="true">{item.icon}</span>
               <span>
                 <strong>{item.label}</strong>
                 <small>{item.description}</small>
@@ -240,9 +264,9 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">{activeMode.label}</p>
-            <h2>{folder ? folder.split(/[\\/]/).pop() : "先选择一个图片文件夹"}</h2>
+            <h2>{folder ? folderName(folder) : "先选择一个图片文件夹"}</h2>
           </div>
-          <button className="folder-button" onClick={() => void chooseFolder()}>
+          <button className="folder-button" disabled={isMutating} onClick={() => void chooseFolder()}>
             <span>＋</span> 选择文件夹
           </button>
         </header>
@@ -266,14 +290,14 @@ function App() {
               </label>
             </>
           )}
-          <button className="scan-button" disabled={!folder || isScanning} onClick={() => void scan()}>
+          <button className="scan-button" disabled={!folder || isScanning || isMutating} onClick={() => void scan()}>
             {isScanning ? "扫描中…" : "重新扫描"}
           </button>
           <span className="scan-summary">{scannedCount ? `已扫描 ${scannedCount} 张` : "支持 JPG、PNG、WebP 等常见格式"}</span>
         </div>
 
-        {error && <div className="message error">{error}</div>}
-        {notice && <div className="message">{notice}</div>}
+        {error && <div className="message error" role="alert">{error}</div>}
+        {notice && <div className="message" role="status" aria-live="polite">{notice}</div>}
 
         {!folder ? (
           <div className="empty-state welcome-state">
@@ -293,15 +317,15 @@ function App() {
             <div className="preview-card">
               <div className="preview-stage">
                 <img src={convertFileSrc(activeItem.path)} alt={activeItem.name} draggable={false} />
-                <button className="nav-arrow left" disabled={activeIndex === 0} onClick={() => setActiveIndex((current) => Math.max(0, current - 1))}>‹</button>
-                <button className="nav-arrow right" disabled={activeIndex === items.length - 1} onClick={() => setActiveIndex((current) => Math.min(items.length - 1, current + 1))}>›</button>
+                <button className="nav-arrow left" aria-label="上一张图片" disabled={activeIndex === 0} onClick={() => setActiveIndex((current) => Math.max(0, current - 1))}>‹</button>
+                <button className="nav-arrow right" aria-label="下一张图片" disabled={activeIndex === items.length - 1} onClick={() => setActiveIndex((current) => Math.min(items.length - 1, current + 1))}>›</button>
               </div>
               <div className="preview-footer">
                 <div>
                   <strong>{activeItem.name}</strong>
                   <span>{activeItem.width} × {activeItem.height} · {formatBytes(activeItem.bytes)}</span>
                 </div>
-                <button className="delete-button" onClick={() => void removeActive()}>移入回收站</button>
+                <button className="delete-button" disabled={isMutating} onClick={() => void removeActive()}>{isMutating ? "处理中…" : "移入回收站"}</button>
               </div>
             </div>
 
@@ -332,9 +356,9 @@ function App() {
         )}
 
         {items.length > 1 && (
-          <div className="thumbnail-strip" aria-label="图片列表">
+          <div className="thumbnail-strip" role="group" aria-label="图片列表">
             {items.map((item, index) => (
-              <button className={`thumbnail ${index === activeIndex ? "selected" : ""}`} key={item.id} onClick={() => setActiveIndex(index)} title={item.name}>
+              <button className={`thumbnail ${index === activeIndex ? "selected" : ""}`} key={item.id} aria-label={`查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={item.name}>
                 <img src={convertFileSrc(item.path)} alt="" draggable={false} />
                 {item.groupId !== null && <span>{item.groupId + 1}</span>}
               </button>
