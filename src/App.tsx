@@ -85,6 +85,13 @@ function App() {
     });
     return [...groups.values()];
   }, [items]);
+  const activeGroupIndex = similarGroups.findIndex((group) => group.includes(activeIndex));
+  const visibleThumbnailEntries = mode === "similar"
+    ? similarGroups.flatMap((group, groupIndex) => (groupIndex === activeGroupIndex ? group : [group[0]]).map((index) => ({
+      index,
+      collapsed: groupIndex !== activeGroupIndex,
+    })))
+    : items.map((_, index) => ({ index, collapsed: false }));
   const viewKey = [folder, mode, timeBasis, startDate, endDate].join("\u0000");
 
   async function scan(
@@ -175,17 +182,26 @@ function App() {
     }
   }
 
-  function moveWithinGroup(direction: -1 | 1) {
-    const group = similarGroups.find((candidate) => candidate.includes(activeIndex));
-    if (!group) return;
-    const position = group.indexOf(activeIndex);
-    const nextIndex = group[position + direction];
-    if (nextIndex !== undefined) setActiveIndex(nextIndex);
+  function nextImageIndex(direction: -1 | 1) {
+    if (mode === "similar") {
+      const group = similarGroups.find((candidate) => candidate.includes(activeIndex));
+      if (!group) return null;
+      const nextIndex = group[group.indexOf(activeIndex) + direction];
+      return nextIndex ?? null;
+    }
+
+    const nextIndex = activeIndex + direction;
+    return nextIndex >= 0 && nextIndex < items.length ? nextIndex : null;
+  }
+
+  function moveImage(direction: -1 | 1) {
+    const nextIndex = nextImageIndex(direction);
+    if (nextIndex !== null) setActiveIndex(nextIndex);
   }
 
   function moveGroup(direction: -1 | 1) {
-    const currentGroup = similarGroups.findIndex((candidate) => candidate.includes(activeIndex));
-    const nextGroup = similarGroups[currentGroup + direction];
+    if (activeGroupIndex < 0) return;
+    const nextGroup = similarGroups[activeGroupIndex + direction];
     if (nextGroup?.[0] !== undefined) setActiveIndex(nextGroup[0]);
   }
 
@@ -206,11 +222,7 @@ function App() {
         moveGroup(event.key === "ArrowUp" ? -1 : 1);
       } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
-        if (inSimilarGroup) {
-          moveWithinGroup(event.key === "ArrowLeft" ? -1 : 1);
-        } else if (items.length > 0) {
-          setActiveIndex((current) => event.key === "ArrowLeft" ? Math.max(0, current - 1) : Math.min(items.length - 1, current + 1));
-        }
+        moveImage(event.key === "ArrowLeft" ? -1 : 1);
       } else if (event.key === "Delete" || event.key === "Backspace" || event.key.toLowerCase() === "d") {
         event.preventDefault();
         void removeActive();
@@ -219,7 +231,7 @@ function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, activeItem, isScanning, isMutating, mode, similarGroups, undoStack, viewKey, folder, timeBasis, startDate, endDate]);
+  }, [items, activeItem, activeGroupIndex, isScanning, isMutating, mode, similarGroups, undoStack, viewKey, folder, timeBasis, startDate, endDate]);
 
   function changeMode(nextMode: Mode) {
     setMode(nextMode);
@@ -317,8 +329,8 @@ function App() {
             <div className="preview-card">
               <div className="preview-stage">
                 <img src={convertFileSrc(activeItem.path)} alt={activeItem.name} draggable={false} />
-                <button className="nav-arrow left" aria-label="上一张图片" disabled={activeIndex === 0} onClick={() => setActiveIndex((current) => Math.max(0, current - 1))}>‹</button>
-                <button className="nav-arrow right" aria-label="下一张图片" disabled={activeIndex === items.length - 1} onClick={() => setActiveIndex((current) => Math.min(items.length - 1, current + 1))}>›</button>
+                <button className="nav-arrow left" aria-label="上一张图片" disabled={nextImageIndex(-1) === null} onClick={() => moveImage(-1)}>‹</button>
+                <button className="nav-arrow right" aria-label="下一张图片" disabled={nextImageIndex(1) === null} onClick={() => moveImage(1)}>›</button>
               </div>
               <div className="preview-footer">
                 <div>
@@ -357,15 +369,16 @@ function App() {
 
         {items.length > 1 && (
           <div className="thumbnail-strip" role="group" aria-label="图片列表">
-            {items.map((item, index) => (
-              <button className={`thumbnail ${index === activeIndex ? "selected" : ""}`} key={item.id} aria-label={`查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={item.name}>
+            {visibleThumbnailEntries.map(({ index, collapsed }) => {
+              const item = items[index];
+              return <button className={`thumbnail ${index === activeIndex ? "selected" : ""} ${collapsed ? "collapsed" : "expanded"}`} key={item.id} aria-label={collapsed ? `查看 ${item.name}，还有 ${item.groupSize - 1} 张相似图片` : `查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={collapsed ? `相似图片组：共 ${item.groupSize} 张，点击展开` : item.name}>
                 <img src={convertFileSrc(item.path)} alt="" draggable={false} />
-                {item.groupId !== null && <span>{item.groupId + 1}</span>}
-              </button>
-            ))}
+                {collapsed && <span>+{item.groupSize - 1}</span>}
+              </button>;
+            })}
           </div>
         )}
-        {mode === "similar" && similarGroups.length > 0 && <p className="footer-note">已找到 {similarGroups.length} 组相似图片，↑↓ 切换分组，←→ 浏览组内图片。</p>}
+        {mode === "similar" && similarGroups.length > 0 && <p className="footer-note">已找到 {similarGroups.length} 组相似图片，未选中的组显示代表图和 +相似数量；↑↓ 切换分组，←→ 浏览当前组。</p>}
       </section>
     </main>
   );

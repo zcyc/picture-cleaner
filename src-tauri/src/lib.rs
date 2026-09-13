@@ -373,7 +373,14 @@ fn is_screenshot_candidate(path: &Path, width: u32, height: u32) -> bool {
     let long_side = width.max(height);
     let mobile_shape =
         short_side >= 500 && (1.6..=2.5).contains(&(long_side as f32 / short_side as f32));
-    name_match || mobile_shape
+    let png_mobile_shape = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        && mobile_shape;
+
+    // ponytail: filename/PNG is a small heuristic; inspect image metadata only if converted screenshots cause false positives.
+    name_match || png_mobile_shape
 }
 
 fn read_capture_date(path: &Path) -> Option<String> {
@@ -491,6 +498,11 @@ mod tests {
         assert!(!in_date_range("2026-08-31", Some("2026-09-01"), None));
         assert!(is_screenshot_candidate(
             Path::new("IMG_screenshot.png"),
+            1170,
+            2532
+        ));
+        assert!(!is_screenshot_candidate(
+            Path::new("IMG_1234.jpg"),
             1170,
             2532
         ));
