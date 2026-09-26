@@ -104,24 +104,43 @@ fn move_to_trash(app: tauri::AppHandle, path: String) -> Result<String, String> 
 }
 
 #[tauri::command]
-fn restore_from_undo(backup_path: String, original_path: String) -> Result<(), String> {
-    let backup = Path::new(&backup_path);
+fn restore_from_undo(
+    app: tauri::AppHandle,
+    backup_path: String,
+    original_path: String,
+) -> Result<(), String> {
+    restore_from_undo_in_scope(backup_path, original_path, |parent| {
+        app.asset_protocol_scope().is_allowed(parent)
+    })
+}
+
+fn restore_from_undo_in_scope(
+    backup_path: String,
+    original_path: String,
+    is_allowed: impl Fn(&Path) -> bool,
+) -> Result<(), String> {
+    let backup = fs::canonicalize(&backup_path).map_err(|_| "撤销备份不存在".to_string())?;
     let original = Path::new(&original_path);
-    if !backup.starts_with(undo_session_dir()) {
+    let undo_dir =
+        fs::canonicalize(undo_session_dir()).map_err(|_| "撤销备份路径无效".to_string())?;
+    if !backup.starts_with(&undo_dir) || !backup.is_file() {
         return Err("撤销备份路径无效".to_string());
     }
-    if !backup.is_file() {
-        return Err("撤销备份不存在，无法回滚".to_string());
-    }
-    if original.exists() {
-        return Err("原位置已有同名文件，无法回滚".to_string());
-    }
-
     let parent = original
         .parent()
         .ok_or_else(|| "原文件路径无效".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建原文件夹：{error}"))?;
-    copy_with_file_times(backup, original).map_err(|error| format!("无法恢复文件：{error}"))?;
+    if !parent.is_dir() || !is_allowed(parent) {
+        return Err("原文件不在已选择的图片文件夹中".to_string());
+    }
+    match fs::symlink_metadata(original) {
+        Ok(_) => return Err("原位置已有同名文件，无法回滚".to_string()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("无法检查原文件位置：{error}"));
+        }
+        Err(_) => {}
+    }
+
+    copy_with_file_times(&backup, original).map_err(|error| format!("无法恢复文件：{error}"))?;
     let _ = fs::remove_file(backup);
     Ok(())
 }
@@ -411,10 +430,8 @@ fn is_screenshot_candidate(path: &Path, width: u32, height: u32) -> bool {
     ]
     .iter()
     .any(|marker| name.contains(marker));
-    let short_side = width.min(height);
-    let long_side = width.max(height);
     let mobile_shape =
-        short_side >= 500 && (1.6..=2.5).contains(&(long_side as f32 / short_side as f32));
+        height > width && width >= 500 && (1.6..=2.5).contains(&(height as f32 / width as f32));
     let png_mobile_shape = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -529,7 +546,7 @@ pub fn run() {
 mod tests {
     use super::{
         analyze_image, create_undo_backup, in_date_range, is_screenshot_candidate,
-        normalize_exif_date, restore_from_undo, scan_folder_sync, similar_items,
+        normalize_exif_date, restore_from_undo_in_scope, scan_folder_sync, similar_items,
         validate_date_range, Candidate, ImageItem, ScanMode, ScanOptions, TimeBasis,
     };
     use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder};
@@ -556,6 +573,16 @@ mod tests {
             Path::new("IMG_1234.jpg"),
             1170,
             2532
+        ));
+        assert!(!is_screenshot_candidate(
+            Path::new("IMG_1234.png"),
+            2532,
+            1170
+        ));
+        assert!(is_screenshot_candidate(
+            Path::new("IMG_screenshot.jpg"),
+            2532,
+            1170
         ));
         assert!(!is_screenshot_candidate(
             Path::new("Screenshots/holiday.png"),
@@ -591,9 +618,18 @@ mod tests {
         let backup = create_undo_backup(&original).unwrap();
         fs::remove_file(&original).unwrap();
 
-        restore_from_undo(
+        let denied = restore_from_undo_in_scope(
             backup.to_string_lossy().into_owned(),
             original.to_string_lossy().into_owned(),
+            |_| false,
+        );
+        assert!(denied.is_err());
+        assert!(!original.exists());
+
+        restore_from_undo_in_scope(
+            backup.to_string_lossy().into_owned(),
+            original.to_string_lossy().into_owned(),
+            |_| true,
         )
         .unwrap();
 
@@ -602,6 +638,31 @@ mod tests {
             fs::metadata(&original).unwrap().modified().unwrap(),
             original_modified
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn undo_rejects_backup_outside_session_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "picture-cleaner-outside-undo-test-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let backup = root.join("untrusted-backup");
+        let original = root.join("restored.jpg");
+        fs::write(&backup, b"not an undo backup").unwrap();
+
+        let result = restore_from_undo_in_scope(
+            backup.to_string_lossy().into_owned(),
+            original.to_string_lossy().into_owned(),
+            |_| true,
+        );
+
+        assert!(result.is_err());
+        assert!(!original.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

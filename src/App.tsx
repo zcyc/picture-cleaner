@@ -28,9 +28,6 @@ type ScanResponse = {
 type UndoEntry = {
   item: ImageItem;
   backupPath: string;
-  index: number;
-  viewKey: string;
-  scanVersion: number;
 };
 
 const modes: { id: Mode; label: string; icon: string; description: string }[] = [
@@ -98,8 +95,6 @@ function App() {
       groupSize: group.length,
     })))
     : items.map((_, index) => ({ index, collapsed: false, groupSize: 1 }));
-  const viewKey = [folder, mode, timeBasis, startDate, endDate].join("\u0000");
-
   async function scan(
     nextFolder = folder,
     nextMode = mode,
@@ -160,12 +155,21 @@ function App() {
       setUndoStack((current) => [...current, {
         item: activeItem,
         backupPath,
-        index: activeIndex,
-        viewKey,
-        scanVersion: scanVersion.current,
       }]);
-      setItems((current) => current.filter((item) => item.id !== activeItem.id));
-      setActiveIndex((current) => Math.min(current, Math.max(0, items.length - 2)));
+      const remaining = items.filter((item) => item.id !== activeItem.id);
+      const groupSizes = new Map<number, number>();
+      if (mode === "similar") {
+        remaining.forEach((item) => {
+          if (item.groupId !== null) groupSizes.set(item.groupId, (groupSizes.get(item.groupId) ?? 0) + 1);
+        });
+      }
+      const nextItems = mode === "similar"
+        ? remaining
+          .filter((item) => item.groupId === null || (groupSizes.get(item.groupId) ?? 0) > 1)
+          .map((item) => item.groupId === null ? item : { ...item, groupSize: groupSizes.get(item.groupId) ?? item.groupSize })
+        : remaining;
+      setItems(nextItems);
+      setActiveIndex(Math.min(activeIndex, Math.max(0, nextItems.length - 1)));
       setNotice(`已移入回收站：${activeItem.name}`);
     } catch (deleteError) {
       setError(errorMessage(deleteError));
@@ -181,16 +185,7 @@ function App() {
     try {
       await invoke("restore_from_undo", { backupPath: entry.backupPath, originalPath: entry.item.path });
       setUndoStack((current) => current.slice(0, -1));
-      if (entry.viewKey === viewKey && entry.scanVersion === scanVersion.current) {
-        setItems((current) => {
-          const next = [...current];
-          next.splice(Math.min(entry.index, next.length), 0, entry.item);
-          return next;
-        });
-        setActiveIndex(Math.min(entry.index, items.length));
-      } else if (folder) {
-        await scan();
-      }
+      if (folder) await scan();
       setNotice(`已撤销删除：${entry.item.name}`);
     } catch (undoError) {
       setError(errorMessage(undoError));
@@ -200,6 +195,7 @@ function App() {
   }
 
   function nextImageIndex(direction: -1 | 1) {
+    if (isMutating) return null;
     if (mode === "similar") {
       const group = similarGroups.find((candidate) => candidate.includes(activeIndex));
       if (!group) return null;
@@ -217,7 +213,7 @@ function App() {
   }
 
   function moveGroup(direction: -1 | 1) {
-    if (similarGroups.length === 0) return;
+    if (isMutating || similarGroups.length === 0) return;
     const nextGroupIndex = activeGroupIndex < 0
       ? (direction === 1 ? 0 : similarGroups.length - 1)
       : activeGroupIndex + direction;
@@ -251,7 +247,7 @@ function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, activeItem, activeGroupIndex, isScanning, isMutating, mode, similarGroups, undoStack, viewKey, folder, timeBasis, startDate, endDate]);
+  }, [items, activeItem, activeGroupIndex, isScanning, isMutating, mode, similarGroups, undoStack, folder, timeBasis, startDate, endDate]);
 
   function changeMode(nextMode: Mode) {
     setMode(nextMode);
@@ -391,7 +387,7 @@ function App() {
           <div className="thumbnail-strip" role="group" aria-label="图片列表">
             {visibleThumbnailEntries.map(({ index, collapsed, groupSize }) => {
               const item = items[index];
-              return <button className={`thumbnail ${index === activeIndex ? "selected" : ""} ${collapsed ? "collapsed" : "expanded"}`} key={item.id} aria-label={collapsed ? `查看 ${item.name}，还有 ${groupSize - 1} 张相似图片` : `查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={collapsed ? `相似图片组：共 ${groupSize} 张，点击展开` : item.name}>
+              return <button className={`thumbnail ${index === activeIndex ? "selected" : ""} ${collapsed ? "collapsed" : "expanded"}`} key={item.id} disabled={isMutating} aria-label={collapsed ? `查看 ${item.name}，还有 ${groupSize - 1} 张相似图片` : `查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={collapsed ? `相似图片组：共 ${groupSize} 张，点击展开` : item.name}>
                 <img src={convertFileSrc(item.path)} alt="" draggable={false} />
                 {collapsed && <span>+{groupSize - 1}</span>}
               </button>;
