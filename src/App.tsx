@@ -80,18 +80,21 @@ function App() {
     const groups = new Map<number, number[]>();
     items.forEach((item, index) => {
       if (item.groupId !== null) {
-        groups.set(item.groupId, [...(groups.get(item.groupId) ?? []), index]);
+        const group = groups.get(item.groupId);
+        if (group) group.push(index);
+        else groups.set(item.groupId, [index]);
       }
     });
-    return [...groups.values()];
+    return [...groups.values()].filter((group) => group.length > 1);
   }, [items]);
   const activeGroupIndex = similarGroups.findIndex((group) => group.includes(activeIndex));
   const visibleThumbnailEntries = mode === "similar"
     ? similarGroups.flatMap((group, groupIndex) => (groupIndex === activeGroupIndex ? group : [group[0]]).map((index) => ({
       index,
       collapsed: groupIndex !== activeGroupIndex,
+      groupSize: group.length,
     })))
-    : items.map((_, index) => ({ index, collapsed: false }));
+    : items.map((_, index) => ({ index, collapsed: false, groupSize: 1 }));
   const viewKey = [folder, mode, timeBasis, startDate, endDate].join("\u0000");
 
   async function scan(
@@ -106,6 +109,9 @@ function App() {
     setIsScanning(true);
     setError(null);
     setNotice(null);
+    setItems([]);
+    setActiveIndex(0);
+    setScannedCount(0);
     try {
       const result = await invoke<ScanResponse>("scan_folder", {
         options: {
@@ -200,8 +206,11 @@ function App() {
   }
 
   function moveGroup(direction: -1 | 1) {
-    if (activeGroupIndex < 0) return;
-    const nextGroup = similarGroups[activeGroupIndex + direction];
+    if (similarGroups.length === 0) return;
+    const nextGroupIndex = activeGroupIndex < 0
+      ? (direction === 1 ? 0 : similarGroups.length - 1)
+      : activeGroupIndex + direction;
+    const nextGroup = similarGroups[nextGroupIndex];
     if (nextGroup?.[0] !== undefined) setActiveIndex(nextGroup[0]);
   }
 
@@ -288,17 +297,17 @@ function App() {
             <>
               <label>
                 时间依据
-                <select value={timeBasis} onChange={(event) => setTimeBasis(event.target.value as TimeBasis)}>
+                <select value={timeBasis} disabled={isScanning || isMutating} onChange={(event) => setTimeBasis(event.target.value as TimeBasis)}>
                   {timeBases.map((basis) => <option value={basis.id} key={basis.id}>{basis.label}</option>)}
                 </select>
               </label>
               <label>
                 从
-                <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                <input type="date" value={startDate} disabled={isScanning || isMutating} onChange={(event) => setStartDate(event.target.value)} />
               </label>
               <label>
                 到
-                <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+                <input type="date" value={endDate} disabled={isScanning || isMutating} onChange={(event) => setEndDate(event.target.value)} />
               </label>
             </>
           )}
@@ -349,7 +358,7 @@ function App() {
                 <strong>{activeItem.date}</strong>
                 <small>{activeItem.dateSource === "captured" ? "来自 EXIF 拍摄时间" : `来自${activeItem.dateSource === "created" ? "文件创建时间" : "文件修改时间"}`}</small>
               </div>
-              {activeItem.groupId !== null && <div className="similar-badge">相似组 {activeItem.groupId + 1} · 共 {activeItem.groupSize} 张</div>}
+              {activeGroupIndex >= 0 && <div className="similar-badge">相似组 {activeGroupIndex + 1} · 共 {similarGroups[activeGroupIndex].length} 张</div>}
               <div className="detail-block shortcut-block">
                 <span className="detail-label">快捷键</span>
                 {mode === "similar" && <div><kbd>↑</kbd><kbd>↓</kbd><span>切换分组</span></div>}
@@ -362,18 +371,18 @@ function App() {
         ) : (
           <div className="empty-state">
             <div className="empty-icon">✓</div>
-            <h3>这里很干净</h3>
-            <p>没有需要处理的图片。</p>
+            <h3>{error ? "扫描未完成" : "这里很干净"}</h3>
+            <p>{error ? "没有可展示的扫描结果，请修复错误后重新扫描。" : "没有需要处理的图片。"}</p>
           </div>
         )}
 
         {items.length > 1 && (
           <div className="thumbnail-strip" role="group" aria-label="图片列表">
-            {visibleThumbnailEntries.map(({ index, collapsed }) => {
+            {visibleThumbnailEntries.map(({ index, collapsed, groupSize }) => {
               const item = items[index];
-              return <button className={`thumbnail ${index === activeIndex ? "selected" : ""} ${collapsed ? "collapsed" : "expanded"}`} key={item.id} aria-label={collapsed ? `查看 ${item.name}，还有 ${item.groupSize - 1} 张相似图片` : `查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={collapsed ? `相似图片组：共 ${item.groupSize} 张，点击展开` : item.name}>
+              return <button className={`thumbnail ${index === activeIndex ? "selected" : ""} ${collapsed ? "collapsed" : "expanded"}`} key={item.id} aria-label={collapsed ? `查看 ${item.name}，还有 ${groupSize - 1} 张相似图片` : `查看 ${item.name}`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)} title={collapsed ? `相似图片组：共 ${groupSize} 张，点击展开` : item.name}>
                 <img src={convertFileSrc(item.path)} alt="" draggable={false} />
-                {collapsed && <span>+{item.groupSize - 1}</span>}
+                {collapsed && <span>+{groupSize - 1}</span>}
               </button>;
             })}
           </div>

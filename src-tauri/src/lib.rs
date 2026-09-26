@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{self, File},
+    fs::{self, File, FileTimes},
     io::BufReader,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -117,7 +117,7 @@ fn restore_from_undo(backup_path: String, original_path: String) -> Result<(), S
         .parent()
         .ok_or_else(|| "原文件路径无效".to_string())?;
     fs::create_dir_all(parent).map_err(|error| format!("无法创建原文件夹：{error}"))?;
-    fs::copy(backup, original).map_err(|error| format!("无法恢复文件：{error}"))?;
+    copy_with_file_times(backup, original).map_err(|error| format!("无法恢复文件：{error}"))?;
     let _ = fs::remove_file(backup);
     Ok(())
 }
@@ -134,8 +134,42 @@ fn create_undo_backup(file: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法生成撤销备份名称：{error}"))?
         .as_nanos();
     let backup = undo_dir.join(format!("{}-{}-{filename}", std::process::id(), timestamp));
-    fs::copy(file, &backup).map_err(|error| format!("无法创建撤销备份：{error}"))?;
+    copy_with_file_times(file, &backup)
+        .map_err(|error| format!("无法创建撤销备份：{error}"))?;
     Ok(backup)
+}
+
+fn copy_with_file_times(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(source).map_err(|error| error.to_string())?;
+    if let Err(error) = fs::copy(source, destination) {
+        let _ = fs::remove_file(destination);
+        return Err(error.to_string());
+    }
+
+    let mut times = FileTimes::new();
+    if let Ok(modified) = metadata.modified() {
+        times = times.set_modified(modified);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::darwin::fs::FileTimesExt;
+        if let Ok(created) = metadata.created() {
+            times = times.set_created(created);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTimesExt;
+        if let Ok(created) = metadata.created() {
+            times = times.set_created(created);
+        }
+    }
+
+    if let Err(error) = File::open(destination).and_then(|file| file.set_times(times)) {
+        let _ = fs::remove_file(destination);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
@@ -155,7 +189,7 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
         .collect::<Vec<_>>();
     image_paths.sort_unstable();
     let total_scanned = image_paths.len();
-    let candidates = image_paths
+    let mut candidates = image_paths
         .par_iter()
         .filter_map(|path| {
             let Ok(candidate) = analyze_image(path, &options.time_basis, needs_hashes) else {
@@ -179,6 +213,7 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
             Some(candidate)
         })
         .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| left.item.path.cmp(&right.item.path));
 
     let items = match options.mode {
         ScanMode::Similar => similar_items(candidates),
