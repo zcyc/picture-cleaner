@@ -1,6 +1,9 @@
 use chrono::{DateTime, Local, NaiveDate};
 use exif::{In, Reader, Tag};
-use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageReader};
+use image::{
+    imageops::FilterType, metadata::Orientation, DynamicImage, GenericImageView, ImageDecoder,
+    ImageReader,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -59,6 +62,7 @@ struct ImageItem {
 struct ScanResponse {
     items: Vec<ImageItem>,
     total_scanned: usize,
+    skipped_count: usize,
 }
 
 struct Candidate {
@@ -131,15 +135,11 @@ fn undo_session_dir() -> PathBuf {
 fn create_undo_backup(file: &Path) -> Result<PathBuf, String> {
     let undo_dir = undo_session_dir();
     fs::create_dir_all(&undo_dir).map_err(|error| format!("无法创建撤销备份：{error}"))?;
-    let filename = file
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("image");
     let timestamp = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("无法生成撤销备份名称：{error}"))?
         .as_nanos();
-    let backup = undo_dir.join(format!("{}-{}-{filename}", std::process::id(), timestamp));
+    let backup = undo_dir.join(format!("{}-{timestamp}", std::process::id()));
     copy_with_file_times(file, &backup).map_err(|error| format!("无法创建撤销备份：{error}"))?;
     Ok(backup)
 }
@@ -194,28 +194,26 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
     }
     image_paths.sort_unstable();
     let total_scanned = image_paths.len();
-    let mut candidates = image_paths
+    let screenshots_only = matches!(&options.mode, ScanMode::Screenshots);
+    let analyzed = image_paths
         .par_iter()
-        .filter_map(|path| {
-            let Ok(candidate) = analyze_image(path, &options.time_basis, needs_hashes) else {
-                return None;
-            };
-
-            if !in_date_range(
-                &candidate.item.date,
+        .map(|path| analyze_image(path, &options.time_basis, needs_hashes))
+        .collect::<Vec<_>>();
+    let skipped_count = analyzed
+        .iter()
+        .filter(|candidate| candidate.is_err())
+        .count();
+    let mut candidates = analyzed
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|candidate| {
+            let item = &candidate.item;
+            in_date_range(
+                &item.date,
                 options.start_date.as_deref(),
                 options.end_date.as_deref(),
-            ) {
-                return None;
-            }
-
-            if matches!(options.mode, ScanMode::Screenshots)
-                && !is_screenshot_candidate(path, candidate.item.width, candidate.item.height)
-            {
-                return None;
-            }
-
-            Some(candidate)
+            ) && (!screenshots_only
+                || is_screenshot_candidate(Path::new(&item.path), item.width, item.height))
         })
         .collect::<Vec<_>>();
     candidates.sort_unstable_by(|left, right| left.item.path.cmp(&right.item.path));
@@ -231,6 +229,7 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
     Ok(ScanResponse {
         items,
         total_scanned,
+        skipped_count,
     })
 }
 
@@ -240,10 +239,13 @@ fn analyze_image(
     needs_hashes: bool,
 ) -> Result<Candidate, String> {
     let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
-    let image = ImageReader::open(path)
+    let mut decoder = ImageReader::open(path)
         .map_err(|error| error.to_string())?
-        .decode()
+        .into_decoder()
         .map_err(|error| error.to_string())?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
+    image.apply_orientation(orientation);
     let (width, height) = image.dimensions();
     let captured = read_capture_date(path);
     let created = format_system_time(metadata.created().ok());
@@ -526,9 +528,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_undo_backup, in_date_range, is_screenshot_candidate, normalize_exif_date,
-        restore_from_undo, similar_items, validate_date_range, Candidate, ImageItem,
+        analyze_image, create_undo_backup, in_date_range, is_screenshot_candidate,
+        normalize_exif_date, restore_from_undo, scan_folder_sync, similar_items,
+        validate_date_range, Candidate, ImageItem, ScanMode, ScanOptions, TimeBasis,
     };
+    use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder};
     use std::{
         fs::{self, File},
         path::Path,
@@ -576,7 +580,7 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let original = root.join("photo.jpg");
+        let original = root.join(format!("{}.jpg", "a".repeat(240)));
         fs::write(&original, b"test image").unwrap();
         let original_modified =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_650_000_000);
@@ -598,6 +602,59 @@ mod tests {
             fs::metadata(&original).unwrap().modified().unwrap(),
             original_modified
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_analysis_applies_exif_orientation() {
+        let root = std::env::temp_dir().join(format!(
+            "picture-cleaner-orientation-test-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("portrait.jpg");
+        let exif = [
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0,
+            0,
+        ];
+        let mut encoder = JpegEncoder::new(File::create(&path).unwrap());
+        encoder.set_exif_metadata(exif.to_vec()).unwrap();
+        encoder
+            .write_image(&[0; 18], 2, 3, ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let image = analyze_image(&path, &TimeBasis::Modified, false).unwrap();
+        assert_eq!((image.item.width, image.item.height), (3, 2));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scan_reports_unreadable_images() {
+        let root = std::env::temp_dir().join(format!(
+            "picture-cleaner-unreadable-test-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("broken.jpg"), b"not an image").unwrap();
+
+        let response = scan_folder_sync(ScanOptions {
+            root_path: root.to_string_lossy().into_owned(),
+            mode: ScanMode::Time,
+            time_basis: TimeBasis::Modified,
+            start_date: None,
+            end_date: None,
+        })
+        .unwrap();
+        assert_eq!(response.total_scanned, 1);
+        assert_eq!(response.skipped_count, 1);
+        assert!(response.items.is_empty());
+
         fs::remove_dir_all(root).unwrap();
     }
 

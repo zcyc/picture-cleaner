@@ -22,6 +22,7 @@ type ImageItem = {
 type ScanResponse = {
   items: ImageItem[];
   totalScanned: number;
+  skippedCount: number;
 };
 
 type UndoEntry = {
@@ -128,7 +129,9 @@ function App() {
       setItems(result.items);
       setScannedCount(result.totalScanned);
       setActiveIndex(0);
-      if (result.items.length === 0) {
+      if (result.skippedCount > 0) {
+        setNotice(`有 ${result.skippedCount} 张图片无法读取，已跳过。`);
+      } else if (result.items.length === 0) {
         setNotice(nextMode === "similar" ? "没有找到足够相似的图片。" : "当前条件下没有找到图片。");
       }
     } catch (scanError) {
