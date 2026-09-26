@@ -29,6 +29,7 @@ type UndoEntry = {
   backupPath: string;
   index: number;
   viewKey: string;
+  scanVersion: number;
 };
 
 const modes: { id: Mode; label: string; icon: string; description: string }[] = [
@@ -44,7 +45,8 @@ const timeBases: { id: TimeBasis; label: string }[] = [
 ];
 
 function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
@@ -152,7 +154,13 @@ function App() {
     setIsMutating(true);
     try {
       const backupPath = await invoke<string>("move_to_trash", { path: activeItem.path });
-      setUndoStack((current) => [...current, { item: activeItem, backupPath, index: activeIndex, viewKey }]);
+      setUndoStack((current) => [...current, {
+        item: activeItem,
+        backupPath,
+        index: activeIndex,
+        viewKey,
+        scanVersion: scanVersion.current,
+      }]);
       setItems((current) => current.filter((item) => item.id !== activeItem.id));
       setActiveIndex((current) => Math.min(current, Math.max(0, items.length - 2)));
       setNotice(`已移入回收站：${activeItem.name}`);
@@ -170,7 +178,7 @@ function App() {
     try {
       await invoke("restore_from_undo", { backupPath: entry.backupPath, originalPath: entry.item.path });
       setUndoStack((current) => current.slice(0, -1));
-      if (entry.viewKey === viewKey) {
+      if (entry.viewKey === viewKey && entry.scanVersion === scanVersion.current) {
         setItems((current) => {
           const next = [...current];
           next.splice(Math.min(entry.index, next.length), 0, entry.item);
