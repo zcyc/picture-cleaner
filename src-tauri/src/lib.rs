@@ -103,7 +103,7 @@ fn move_to_trash(app: tauri::AppHandle, path: String) -> Result<String, String> 
 fn restore_from_undo(backup_path: String, original_path: String) -> Result<(), String> {
     let backup = Path::new(&backup_path);
     let original = Path::new(&original_path);
-    if !backup.starts_with(std::env::temp_dir().join("picture-cleaner-undo")) {
+    if !backup.starts_with(undo_session_dir()) {
         return Err("撤销备份路径无效".to_string());
     }
     if !backup.is_file() {
@@ -122,8 +122,14 @@ fn restore_from_undo(backup_path: String, original_path: String) -> Result<(), S
     Ok(())
 }
 
+fn undo_session_dir() -> PathBuf {
+    std::env::temp_dir()
+        .join("picture-cleaner-undo")
+        .join(std::process::id().to_string())
+}
+
 fn create_undo_backup(file: &Path) -> Result<PathBuf, String> {
-    let undo_dir = std::env::temp_dir().join("picture-cleaner-undo");
+    let undo_dir = undo_session_dir();
     fs::create_dir_all(&undo_dir).map_err(|error| format!("无法创建撤销备份：{error}"))?;
     let filename = file
         .file_name()
@@ -134,8 +140,7 @@ fn create_undo_backup(file: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法生成撤销备份名称：{error}"))?
         .as_nanos();
     let backup = undo_dir.join(format!("{}-{}-{filename}", std::process::id(), timestamp));
-    copy_with_file_times(file, &backup)
-        .map_err(|error| format!("无法创建撤销备份：{error}"))?;
+    copy_with_file_times(file, &backup).map_err(|error| format!("无法创建撤销备份：{error}"))?;
     Ok(backup)
 }
 
@@ -180,13 +185,13 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
     validate_date_range(options.start_date.as_deref(), options.end_date.as_deref())?;
     let needs_hashes = matches!(&options.mode, ScanMode::Similar);
 
-    let mut image_paths = WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && is_supported_image(entry.path()))
-        .map(|entry| entry.into_path())
-        .collect::<Vec<_>>();
+    let mut image_paths = Vec::new();
+    for entry in WalkDir::new(&root).follow_links(false) {
+        let entry = entry.map_err(|error| format!("无法遍历图片文件夹：{error}"))?;
+        if entry.file_type().is_file() && is_supported_image(entry.path()) {
+            image_paths.push(entry.into_path());
+        }
+    }
     image_paths.sort_unstable();
     let total_scanned = image_paths.len();
     let mut candidates = image_paths
@@ -437,14 +442,8 @@ fn read_capture_date(path: &Path) -> Option<String> {
 
 fn normalize_exif_date(value: &str) -> Option<String> {
     let date = value.trim().trim_matches('"').split_whitespace().next()?;
-    let mut parts = date.split(':');
-    let year = parts.next()?;
-    let month = parts.next()?;
-    let day = parts.next()?;
-    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
-        return None;
-    }
-    Some(format!("{year}-{month}-{day}"))
+    let date = NaiveDate::parse_from_str(date, "%Y:%m:%d").ok()?;
+    Some(date.format("%Y-%m-%d").to_string())
 }
 
 fn format_system_time(time: Option<SystemTime>) -> Option<String> {
@@ -504,15 +503,24 @@ fn validate_date_range(start: Option<&str>, end: Option<&str>) -> Result<(), Str
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             scan_folder,
             move_to_trash,
             restore_from_undo
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Err(error) = fs::remove_dir_all(undo_session_dir()) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("无法清理本次会话的撤销备份：{error}");
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -521,7 +529,11 @@ mod tests {
         create_undo_backup, in_date_range, is_screenshot_candidate, normalize_exif_date,
         restore_from_undo, similar_items, validate_date_range, Candidate, ImageItem,
     };
-    use std::{fs, path::Path, time::SystemTime};
+    use std::{
+        fs::{self, File},
+        path::Path,
+        time::SystemTime,
+    };
 
     #[test]
     fn date_filter_and_screenshot_detection_work() {
@@ -550,6 +562,7 @@ mod tests {
             normalize_exif_date("2026:09:07 12:30:00"),
             Some("2026-09-07".to_string())
         );
+        assert_eq!(normalize_exif_date("2026:02:30 12:30:00"), None);
         assert!(validate_date_range(Some("2026-09-08"), Some("2026-09-07")).is_err());
     }
 
@@ -565,6 +578,12 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let original = root.join("photo.jpg");
         fs::write(&original, b"test image").unwrap();
+        let original_modified =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_650_000_000);
+        File::open(&original)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
         let backup = create_undo_backup(&original).unwrap();
         fs::remove_file(&original).unwrap();
 
@@ -575,6 +594,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read(&original).unwrap(), b"test image");
+        assert_eq!(
+            fs::metadata(&original).unwrap().modified().unwrap(),
+            original_modified
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
