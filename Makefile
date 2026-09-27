@@ -4,7 +4,6 @@ MACOS_APP := $(BUNDLE_ROOT)/macos/$(APP_NAME).app
 MACOS_INSTALL_DIR ?= $(HOME)/Applications
 APPLE_SIGNING_IDENTITY ?= -
 WINDOWS_CERTIFICATE ?=
-WINDOWS_CERTIFICATE_PASSWORD ?=
 WINDOWS_TIMESTAMP_URL ?= http://timestamp.digicert.com
 SIGNTOOL ?= signtool.exe
 
@@ -40,7 +39,7 @@ sign-macos:
 
 sign-windows:
 	$(MAKE) build-windows
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -BundleRoot "$(BUNDLE_ROOT)" -CertificatePath "$(WINDOWS_CERTIFICATE)" -CertificatePassword "$(WINDOWS_CERTIFICATE_PASSWORD)" -SignTool "$(SIGNTOOL)" -TimestampUrl "$(WINDOWS_TIMESTAMP_URL)"
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -BundleRoot "$(BUNDLE_ROOT)" -CertificatePath "$(WINDOWS_CERTIFICATE)" -SignTool "$(SIGNTOOL)" -TimestampUrl "$(WINDOWS_TIMESTAMP_URL)"
 
 install-macos: sign-macos
 	mkdir -p "$(MACOS_INSTALL_DIR)"

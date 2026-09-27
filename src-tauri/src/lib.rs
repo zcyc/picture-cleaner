@@ -67,6 +67,7 @@ struct ScanResponse {
 
 struct Candidate {
     item: ImageItem,
+    has_capture_date: bool,
     full_hash: Option<u64>,
     crop_hash: Option<u64>,
 }
@@ -201,7 +202,10 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
     if !root.is_dir() {
         return Err("请选择一个有效的图片文件夹".to_string());
     }
-    validate_date_range(options.start_date.as_deref(), options.end_date.as_deref())?;
+    let time_only = matches!(&options.mode, ScanMode::Time);
+    if time_only {
+        validate_date_range(options.start_date.as_deref(), options.end_date.as_deref())?;
+    }
     let needs_hashes = matches!(&options.mode, ScanMode::Similar);
 
     let mut image_paths = Vec::new();
@@ -227,12 +231,19 @@ fn scan_folder_sync(options: ScanOptions) -> Result<ScanResponse, String> {
         .filter_map(Result::ok)
         .filter(|candidate| {
             let item = &candidate.item;
-            in_date_range(
-                &item.date,
-                options.start_date.as_deref(),
-                options.end_date.as_deref(),
-            ) && (!screenshots_only
-                || is_screenshot_candidate(Path::new(&item.path), item.width, item.height))
+            (!time_only
+                || in_date_range(
+                    &item.date,
+                    options.start_date.as_deref(),
+                    options.end_date.as_deref(),
+                ))
+                && (!screenshots_only
+                    || is_screenshot_candidate(
+                        Path::new(&item.path),
+                        item.width,
+                        item.height,
+                        candidate.has_capture_date,
+                    ))
         })
         .collect::<Vec<_>>();
     candidates.sort_unstable_by(|left, right| left.item.path.cmp(&right.item.path));
@@ -267,12 +278,14 @@ fn analyze_image(
     image.apply_orientation(orientation);
     let (width, height) = image.dimensions();
     let captured = read_capture_date(path);
+    let has_capture_date = captured.is_some();
     let created = format_system_time(metadata.created().ok());
     let modified = format_system_time(metadata.modified().ok());
     let (date, date_source) = choose_date(time_basis, captured, created, modified);
     let path_string = path.to_string_lossy().into_owned();
 
     Ok(Candidate {
+        has_capture_date,
         item: ImageItem {
             id: path_string.clone(),
             path: path_string,
@@ -414,7 +427,7 @@ fn is_supported_image(path: &Path) -> bool {
     )
 }
 
-fn is_screenshot_candidate(path: &Path, width: u32, height: u32) -> bool {
+fn is_screenshot_candidate(path: &Path, width: u32, height: u32, has_capture_date: bool) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -439,7 +452,7 @@ fn is_screenshot_candidate(path: &Path, width: u32, height: u32) -> bool {
         && mobile_shape;
 
     // ponytail: filename/PNG is a small heuristic; inspect image metadata only if converted screenshots cause false positives.
-    name_match || png_mobile_shape
+    name_match || (png_mobile_shape && !has_capture_date)
 }
 
 fn read_capture_date(path: &Path) -> Option<String> {
@@ -567,27 +580,38 @@ mod tests {
         assert!(is_screenshot_candidate(
             Path::new("IMG_screenshot.png"),
             1170,
-            2532
+            2532,
+            false
+        ));
+        assert!(!is_screenshot_candidate(
+            Path::new("IMG_1234.png"),
+            1170,
+            2532,
+            true
         ));
         assert!(!is_screenshot_candidate(
             Path::new("IMG_1234.jpg"),
             1170,
-            2532
+            2532,
+            false
         ));
         assert!(!is_screenshot_candidate(
             Path::new("IMG_1234.png"),
             2532,
-            1170
+            1170,
+            false
         ));
         assert!(is_screenshot_candidate(
             Path::new("IMG_screenshot.jpg"),
             2532,
-            1170
+            1170,
+            true
         ));
         assert!(!is_screenshot_candidate(
             Path::new("Screenshots/holiday.png"),
             1000,
-            1000
+            1000,
+            false
         ));
         assert_eq!(
             normalize_exif_date("2026:09:07 12:30:00"),
@@ -720,6 +744,34 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_scan_ignores_hidden_date_filters() {
+        let root = std::env::temp_dir().join(format!(
+            "picture-cleaner-screenshot-date-test-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("screenshot.jpg");
+        JpegEncoder::new(File::create(&path).unwrap())
+            .write_image(&[0; 3], 1, 1, ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let response = scan_folder_sync(ScanOptions {
+            root_path: root.to_string_lossy().into_owned(),
+            mode: ScanMode::Screenshots,
+            time_basis: TimeBasis::Modified,
+            start_date: Some("1901-01-01".to_string()),
+            end_date: Some("1900-01-01".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(response.items.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn similar_items_keeps_connected_groups() {
         let items = similar_items(vec![
             candidate("a", 0, 0),
@@ -752,6 +804,7 @@ mod tests {
                 group_id: None,
                 group_size: 1,
             },
+            has_capture_date: false,
             full_hash: Some(full_hash),
             crop_hash: Some(crop_hash),
         }

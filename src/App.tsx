@@ -67,6 +67,7 @@ function App() {
   const [items, setItems] = useState<ImageItem[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [scannedCount, setScannedCount] = useState(0);
+  const [skippedCount, setSkippedCount] = useState(0);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -110,6 +111,7 @@ function App() {
     setItems([]);
     setActiveIndex(0);
     setScannedCount(0);
+    setSkippedCount(0);
     try {
       const result = await invoke<ScanResponse>("scan_folder", {
         options: {
@@ -123,6 +125,7 @@ function App() {
       if (version !== scanVersion.current) return;
       setItems(result.items);
       setScannedCount(result.totalScanned);
+      setSkippedCount(result.skippedCount);
       setActiveIndex(0);
       if (result.skippedCount > 0) {
         setNotice(`有 ${result.skippedCount} 张图片无法读取，已跳过。`);
@@ -363,7 +366,7 @@ function App() {
               <div className="detail-block">
                 <span className="detail-label">日期</span>
                 <strong>{activeItem.date}</strong>
-                <small>{activeItem.dateSource === "captured" ? "来自 EXIF 拍摄时间" : `来自${activeItem.dateSource === "created" ? "文件创建时间" : "文件修改时间"}`}</small>
+                <small>{activeItem.dateSource === "captured" ? "来自 EXIF 拍摄时间" : activeItem.dateSource === "created" ? "来自文件创建时间" : activeItem.dateSource === "modified" ? "来自文件修改时间" : "时间未知"}</small>
               </div>
               {activeGroupIndex >= 0 && <div className="similar-badge">相似组 {activeGroupIndex + 1} · 共 {similarGroups[activeGroupIndex].length} 张</div>}
               <div className="detail-block shortcut-block">
@@ -378,8 +381,8 @@ function App() {
         ) : (
           <div className="empty-state">
             <div className="empty-icon">✓</div>
-            <h3>{error ? "扫描未完成" : "这里很干净"}</h3>
-            <p>{error ? "没有可展示的扫描结果，请修复错误后重新扫描。" : "没有需要处理的图片。"}</p>
+            <h3>{error ? "扫描未完成" : skippedCount > 0 ? "扫描结果不完整" : "这里很干净"}</h3>
+            <p>{error ? "没有可展示的扫描结果，请修复错误后重新扫描。" : skippedCount > 0 ? "有图片无法读取，当前结果可能不完整。" : "没有需要处理的图片。"}</p>
           </div>
         )}
 

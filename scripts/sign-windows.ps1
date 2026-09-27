@@ -7,6 +7,10 @@ param(
     [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
+if ([string]::IsNullOrWhiteSpace($CertificatePassword)) {
+    $CertificatePassword = $env:WINDOWS_CERTIFICATE_PASSWORD
+}
+
 $signToolCommand = Get-Command $SignTool -ErrorAction SilentlyContinue
 if ($null -eq $signToolCommand) {
     throw "signtool.exe not found; install the Windows SDK or set SIGNTOOL"
